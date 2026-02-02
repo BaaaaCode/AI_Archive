@@ -1,0 +1,7 @@
+streamlit
+kiwipiepy
+langchain
+langchain-community
+langchain-text-splitters
+chromadb
+langchain-google-genai
