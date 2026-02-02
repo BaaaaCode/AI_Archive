@@ -142,7 +142,11 @@ def ask_gemini(vectorstore, question, api_key, chat_history):
     processed_question = tokenize_kiwi(question)
     
     # 2. Retrieve Top 5 Documents (Increased from 3 to improve recall)
-    docs = vectorstore.similarity_search(processed_question, k=7)
+    # Return (doc, score) tuples
+    docs_with_scores = vectorstore.similarity_search_with_score(processed_question, k=5)
+    
+    # Extract docs just for context building
+    docs = [doc for doc, score in docs_with_scores]
     context = "\n\n".join([doc.page_content for doc in docs])
     
     # Format chat history for context
@@ -359,14 +363,23 @@ if prompt := st.chat_input("궁금한 내용을 물어보세요..."):
                     
                     # Optional: Show sources in expander using AI summary
                     with st.expander("📚 참조 문서 (AI 요약)"):
-                         with st.spinner("참조 문서 요약 중..."):
-                            summary = summarize_references(docs, api_key)
-                            st.markdown(summary)
-                            
-                            st.caption("---")
-                            st.caption("🔍 원문 데이터 (토큰화됨)")
-                            for i, doc in enumerate(docs):
-                                st.text(f"[Ref {i+1}] {doc.page_content[:100]}...")
+                         # Check if response indicates failure to find info
+                         # Only skip if the response is short (pure refusal)
+                         # If it's a long partial answer (e.g. "Definition not found, but types are..."), show summary.
+                         if "찾을 수 없습니다" in response_text and len(response_text) < 150:
+                             st.info("💡 답변을 찾을 수 없어 요약을 생략합니다. 원문 데이터를 확인하세요.")
+                             for i, doc in enumerate(docs):
+                                st.caption(f"**Ref {i+1}**")
+                                st.text(doc.page_content)
+                         else:
+                             with st.spinner("참조 문서 요약 중..."):
+                                summary = summarize_references(docs, api_key)
+                                st.markdown(summary)
+                                
+                                st.caption("---")
+                                st.caption("🔍 원문 데이터 (토큰화됨)")
+                                for i, doc in enumerate(docs):
+                                    st.text(f"[Ref {i+1}] {doc.page_content[:100]}...")
                             
                     response = response_text # For history
                 except Exception as e:
