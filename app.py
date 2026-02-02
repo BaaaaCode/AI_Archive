@@ -65,9 +65,12 @@ def get_vectorstore(api_key):
         return vectorstore
     return None
 
+import chromadb
+
 def build_vectorstore(api_key):
     """
     Build new ChromaDB from data folder.
+    Refreshes the DB by deleting the collection via client (safer on Windows).
     """
     persist_dir = "./antigravity_db"
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -116,11 +119,20 @@ def build_vectorstore(api_key):
         google_api_key=api_key
     )
     
+    # Use PersistentClient to handle collection reset
+    client = chromadb.PersistentClient(path=persist_dir)
+    
+    # Try to delete existing collection to avoid duplicates
+    try:
+        client.delete_collection("antigravity_docs")
+    except ValueError:
+        pass # Collection might not exist yet
+    
     vectorstore = Chroma.from_texts(
         texts=all_chunks,
         embedding=embeddings,
         collection_name="antigravity_docs",
-        persist_directory=persist_dir
+        client=client # Pass client directly
     )
     status_text.success("DB successfully built!")
     return vectorstore
@@ -171,6 +183,30 @@ def ask_gemini(vectorstore, question, api_key, chat_history):
 
     return stream_func(), docs
 
+def summarize_references(docs, api_key):
+    """
+    References are in tokenized format (e.g. '제 4 조 ...').
+    Use AI to reconstruct natural Korean and summarize.
+    """
+    content = "\n\n".join([doc.page_content for doc in docs])
+    
+    system_prompt = f"""
+    아래 텍스트는 형태소 분석기에 의해 토큰화되어 띄어쓰기가 어색한 한국어 문서들입니다.
+    이 내용을 읽고, 자연스러운 한국어 문장으로 다듬어서 핵심 내용을 요약해주세요.
+    법률 전문가처럼 명확하고 간결하게 정리해주세요.
+    
+    [Raw Refereces]
+    {content}
+    """
+    
+    llm = ChatGoogleGenerativeAI(
+        model="models/gemini-2.5-flash-lite",
+        google_api_key=api_key,
+        temperature=0
+    )
+    
+    response = llm.invoke(system_prompt)
+    return response.content
 
 # 1. Page Config
 st.set_page_config(
@@ -250,17 +286,28 @@ with st.sidebar:
             # Rebuild DB button for updating data
             if st.button("🔄 DB 갱신하기"):
                  with st.spinner("데이터 처리 중..."):
-                      vectorstore = build_vectorstore(api_key)
+                      # 1. Release existing resources
                       get_vectorstore.clear()
+                      if 'vectorstore' in locals():
+                          del vectorstore
+                      import gc
+                      gc.collect()
+                      
+                      # 2. Build new DB
+                      vectorstore = build_vectorstore(api_key)
                       st.rerun()
 
         else:
             st.warning("⚠️ DB가 없습니다.")
             if st.button("DB 구축하기"):
-                with st.spinner("데이터 처리 중..."):
-                     vectorstore = build_vectorstore(api_key)
-                     get_vectorstore.clear()
-                     st.rerun()
+                 with st.spinner("데이터 처리 중..."):
+                      # Release resources just in case
+                      get_vectorstore.clear() 
+                      import gc
+                      gc.collect()
+                      
+                      vectorstore = build_vectorstore(api_key)
+                      st.rerun()
     else:
         st.info("API Key를 입력하면 DB 상태를 확인할 수 있습니다.")
 
@@ -310,11 +357,16 @@ if prompt := st.chat_input("궁금한 내용을 물어보세요..."):
                     # write_stream returns the full concatenated string
                     response_text = message_placeholder.write_stream(stream)
                     
-                    # Optional: Show sources in expander
-                    with st.expander("📚 참조 문서"):
-                        for i, doc in enumerate(docs):
-                            st.caption(f"**Reference {i+1}**")
-                            st.text(doc.page_content)
+                    # Optional: Show sources in expander using AI summary
+                    with st.expander("📚 참조 문서 (AI 요약)"):
+                         with st.spinner("참조 문서 요약 중..."):
+                            summary = summarize_references(docs, api_key)
+                            st.markdown(summary)
+                            
+                            st.caption("---")
+                            st.caption("🔍 원문 데이터 (토큰화됨)")
+                            for i, doc in enumerate(docs):
+                                st.text(f"[Ref {i+1}] {doc.page_content[:100]}...")
                             
                     response = response_text # For history
                 except Exception as e:
