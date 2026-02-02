@@ -185,7 +185,7 @@ def ask_gemini(vectorstore, question, api_key, chat_history):
         for chunk in llm.stream(system_prompt):
             yield chunk.content
 
-    return stream_func(), docs
+    return stream_func(), docs_with_scores
 
 def summarize_references(docs, api_key):
     """
@@ -219,171 +219,236 @@ st.set_page_config(
     layout="wide"
 )
 
-# 2. Main Title
-st.title("🚀 RAG Chatbot")
-
-# 3. Sidebar
-with st.sidebar:
-    st.header("⚙️ 설정")
-    
-    # Define data directory first to avoid NameError
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    data_dir = os.path.join(current_dir, "data")
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
-    
-    # Load API Key from env if available
-    env_api_key = os.getenv("GOOGLE_API_KEY", "")
-    api_key = st.text_input("Google API Key", value=env_api_key, type="password")
-    
-    if st.button("💾 API Key 저장 (로컬 .env)"):
-        if api_key:
-            with open(".env", "w") as f:
-                f.write(f"GOOGLE_API_KEY={api_key}")
-            st.success("API Key가 .env 파일에 저장되었습니다!")
-            # Reload to apply immediately
-            load_dotenv(override=True)
-            st.rerun()
-        else:
-            st.warning("API Key를 입력해주세요.")
-    
-    # File Upload Section
-    st.markdown("---")
-    st.header("📂 데이터 업로드")
-    uploaded_file = st.file_uploader("학습시킬 파일을 올려주세요 (.txt, .pdf)", type=["txt", "pdf"])
-    if uploaded_file:
-        file_path = os.path.join(data_dir, uploaded_file.name)
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        st.success(f"'{uploaded_file.name}' 저장 완료! 아래 [DB 구축하기]를 눌러 반영해주세요.")
-    
-    st.markdown("---")
-    st.header("🗄️ 데이터 베이스 상태")
-    
-    if api_key:
-        vectorstore = get_vectorstore(api_key)
+def apply_custom_styles():
+    st.markdown("""
+    <style>
+        /* Import Pretendard Font */
+        @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
         
-        if vectorstore:
-            st.success("✅ DB 로드 완료 (antigravity_docs)")
-            
-            # DB Inspection Feature
-            with st.expander("🔍 DB 내부 데이터 확인"):
-                try:
-                    collection_data = vectorstore.get(limit=3) 
-                    
-                    if collection_data and 'documents' in collection_data:
-                        docs = collection_data['documents']
-                        ids = collection_data['ids']
-                        
-                        total_count = vectorstore._collection.count()
-                        st.write(f"📊 **총 청크 수:** {total_count}개")
-                        
-                        st.write("🧩 **샘플 데이터 (최대 3개):**")
-                        for i, doc in enumerate(docs):
-                            st.caption(f"**Chunk {ids[i]}:**")
-                            st.text(doc[:100] + "...") 
-                    else:
-                        st.write("데이터를 가져올 수 없습니다.")
-                except Exception as e:
-                    st.error(f"데이터 확인 중 오류: {e}")
-            
-            # Rebuild DB button for updating data
-            if st.button("🔄 DB 갱신하기"):
-                 with st.spinner("데이터 처리 중..."):
-                      # 1. Release existing resources
-                      get_vectorstore.clear()
-                      if 'vectorstore' in locals():
-                          del vectorstore
-                      import gc
-                      gc.collect()
-                      
-                      # 2. Build new DB
-                      vectorstore = build_vectorstore(api_key)
-                      st.rerun()
-
-        else:
-            st.warning("⚠️ DB가 없습니다.")
-            if st.button("DB 구축하기"):
-                 with st.spinner("데이터 처리 중..."):
-                      # Release resources just in case
-                      get_vectorstore.clear() 
-                      import gc
-                      gc.collect()
-                      
-                      vectorstore = build_vectorstore(api_key)
-                      st.rerun()
-    else:
-        st.info("API Key를 입력하면 DB 상태를 확인할 수 있습니다.")
-
-
-        files = os.listdir(data_dir)
-        if files:
-            st.markdown("---")
-            st.write(f"📂 **소스 파일 ({len(files)}개):**")
-            for f in files:
-                st.caption(f"- {f}")
-        else:
-            st.warning("⚠️ data 폴더가 비어있습니다.")
-
-# 4. Chat Interface
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# Display chat messages from history on app rerun
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# React to user input
-if prompt := st.chat_input("궁금한 내용을 물어보세요..."):
-    # Display user message
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
-
-    # Display assistant response
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
+        html, body, [class*="css"] {
+            font-family: 'Pretendard', sans-serif;
+        }
         
-        if not api_key:
-            response = "⚠️ 사이드바에서 Google API Key를 입력해주세요."
-            message_placeholder.warning(response)
-        elif not vectorstore:
-             response = "⚠️ DB가 로드되지 않았습니다. DB를 먼저 구축해주세요."
-             message_placeholder.warning(response)
-        else:
-            # Change spinner context to allow streaming write
-            with st.spinner("답변 생성 중..."):
+        /* Sidebar Styling */
+        [data-testid="stSidebar"] {
+            background-color: #f8f9fa;
+            border-right: 1px solid #e9ecef;
+        }
+        
+        /* Header Styling */
+        h1 {
+            background: linear-gradient(to right, #1e3c72, #2a5298);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-weight: 800 !important;
+        }
+        
+        h2, h3 {
+            color: #2c3e50;
+            font-weight: 700 !important;
+        }
+        
+        /* Button Styling */
+        .stButton > button {
+            background: linear-gradient(45deg, #2a5298, #1e3c72);
+            color: white !important;
+            border: none;
+            border-radius: 10px;
+            padding: 0.5rem 1rem;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .stButton > button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 8px rgba(0,0,0,0.15);
+            opacity: 0.9;
+        }
+        
+        /* Chat Input Styling */
+        .stChatInput {
+            border-radius: 15px !important;
+        }
+        
+        /* Message Styling (Optional tweaks) */
+        [data-testid="stChatMessage"] {
+            padding: 1rem;
+            border-radius: 15px;
+            margin-bottom: 1rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        
+        /* Expander Styling */
+        .streamlit-expanderHeader {
+            font-weight: 600;
+            color: #1e3c72;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+apply_custom_styles()
+
+# --- Navigation & Page Management ---
+
+def page_chat(api_key, vectorstore):
+    st.title("⚖️ AI Chat")
+    st.caption("🚀 RAG 기반 법률 상담 챗봇")
+
+    if not api_key:
+        st.error("⚠️ API Key가 설정되지 않았습니다. [관리자 페이지]에서 키를 설정해주세요.")
+        return
+    
+    if not vectorstore:
+        st.error("⚠️ 학습된 데이터베이스가 없습니다. [관리자 페이지]에서 문서를 업로드하고 DB를 생성해주세요.")
+        return
+
+    # Chat Interface
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    if prompt := st.chat_input("법률 관련 궁금한 점을 물어보세요..."):
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            with st.spinner("판례와 법령을 분석 중입니다..."):
                 try:
-                    stream, docs = ask_gemini(vectorstore, prompt, api_key, st.session_state.messages)
+                    # Note: ask_gemini returns (stream, docs_with_scores)
+                    stream, docs_with_scores = ask_gemini(vectorstore, prompt, api_key, st.session_state.messages)
                     
-                    # Use st.write_stream to simulate typing effect
-                    # write_stream returns the full concatenated string
+                    # Streaming response
                     response_text = message_placeholder.write_stream(stream)
                     
-                    # Optional: Show sources in expander using AI summary
+                    # Reference Section
                     with st.expander("📚 참조 문서 (AI 요약)"):
-                         # Check if response indicates failure to find info
-                         # Only skip if the response is short (pure refusal)
-                         # If it's a long partial answer (e.g. "Definition not found, but types are..."), show summary.
                          if "찾을 수 없습니다" in response_text and len(response_text) < 150:
                              st.info("💡 답변을 찾을 수 없어 요약을 생략합니다. 원문 데이터를 확인하세요.")
-                             for i, doc in enumerate(docs):
-                                st.caption(f"**Ref {i+1}**")
+                             for i, (doc, score) in enumerate(docs_with_scores):
+                                st.caption(f"**Ref {i+1}** (유사도: {score:.4f})")
                                 st.text(doc.page_content)
                          else:
+                             # Extract just docs for summary
+                             docs = [doc for doc, score in docs_with_scores]
                              with st.spinner("참조 문서 요약 중..."):
                                 summary = summarize_references(docs, api_key)
                                 st.markdown(summary)
-                                
                                 st.caption("---")
-                                st.caption("🔍 원문 데이터 (토큰화됨)")
-                                for i, doc in enumerate(docs):
-                                    st.text(f"[Ref {i+1}] {doc.page_content[:100]}...")
-                            
-                    response = response_text # For history
+                                for i, (doc, score) in enumerate(docs_with_scores):
+                                    st.text(f"[Ref {i+1}] (거리: {score:.4f}) {doc.page_content[:100]}...")
+                    
+                    response = response_text
                 except Exception as e:
                     response = f"❌ 오류 발생: {e}"
                     message_placeholder.error(response)
+        
+        st.session_state.messages.append({"role": "assistant", "content": response})
 
-    st.session_state.messages.append({"role": "assistant", "content": response})
+
+def page_admin(api_key, current_dir, data_dir):
+    st.title("🛠️ 관리자 설정")
+    
+    tab1, tab2 = st.tabs(["🔐 API 및 DB 설정", "📂 문서 데이터 관리"])
+    
+    with tab1:
+        st.subheader("Google API Key 설정")
+        current_key = api_key if api_key else ""
+        new_key = st.text_input("API Key 입력", value=current_key, type="password", key="admin_api_key")
+        
+        if st.button("💾 API Key 저장", type="primary"):
+            if new_key:
+                with open(".env", "w") as f:
+                    f.write(f"GOOGLE_API_KEY={new_key}")
+                st.success("API Key가 저장되었습니다! (새로고침 후 적용)")
+                load_dotenv(override=True)
+                st.rerun()
+        
+        st.markdown("---")
+        st.subheader("데이터베이스 관리")
+        
+        if api_key:
+            vectorstore = get_vectorstore(api_key)
+            if vectorstore:
+                total_count = vectorstore._collection.count()
+                col1, col2 = st.columns(2)
+                col1.metric("총 학습 청크", f"{total_count}개")
+                col2.success("DB 상태: 정상 (antigravity_docs)")
+                
+                if st.button("🔄 전체 DB 재구축/갱신 (기존 데이터 삭제됨)"):
+                    with st.spinner("기존 DB 삭제 및 재학습 중..."):
+                        get_vectorstore.clear()
+                        import gc
+                        gc.collect()
+                        build_vectorstore(api_key)
+                        st.success("DB가 성공적으로 재구축되었습니다!")
+                        st.rerun()
+                
+                with st.expander("🔍 데이터 샘플링"):
+                    docs = vectorstore.get(limit=3)
+                    st.json(docs)
+            else:
+                st.warning("DB가 존재하지 않습니다. 문서를 업로드하고 'DB 생성'을 진행하세요.")
+                if st.button("🆕 DB 생성 시작"):
+                     with st.spinner("DB 생성 중..."):
+                        build_vectorstore(api_key)
+                        st.success("완료!")
+                        st.rerun()
+        else:
+            st.error("API Key가 먼저 설정되어야 합니다.")
+
+    with tab2:
+        st.subheader("학습 문서 업로드")
+        uploaded_files = st.file_uploader("PDF 또는 TXT 파일 업로드", type=["pdf", "txt"], accept_multiple_files=True)
+        if uploaded_files:
+            for uploaded_file in uploaded_files:
+                file_path = os.path.join(data_dir, uploaded_file.name)
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+            st.success(f"{len(uploaded_files)}개 파일 업로드 완료! 'DB 설정' 탭에서 갱신 버튼을 눌러주세요.")
+        
+        st.markdown("---")
+        st.subheader("현재 저장된 파일 목록")
+        if os.path.exists(data_dir):
+            files = os.listdir(data_dir)
+            if files:
+                st.dataframe({"파일명": files}, use_container_width=True)
+            else:
+                st.info("저장된 파일이 없습니다.")
+
+# --- Main Execution ---
+
+# Load Env
+load_dotenv()
+env_api_key = os.getenv("GOOGLE_API_KEY", "")
+
+# Sidebar Navigation
+with st.sidebar:
+    st.header("🤖 메뉴")
+    page = st.radio("이동", ["💬 채팅하기", "🛠️ 관리자 설정"], index=0)
+    
+    st.markdown("---")
+    st.caption("Current Info")
+    if env_api_key:
+        st.success("API Key: 확인됨")
+    else:
+        st.error("API Key: 없음")
+
+# Path Setup
+current_dir = os.path.dirname(os.path.abspath(__file__))
+data_dir = os.path.join(current_dir, "data")
+if not os.path.exists(data_dir):
+    os.makedirs(data_dir)
+
+# Routing
+if page == "💬 채팅하기":
+    # Need to load vectorstore for chat
+    vectorstore = get_vectorstore(env_api_key) if env_api_key else None
+    page_chat(env_api_key, vectorstore)
+elif page == "🛠️ 관리자 설정":
+    page_admin(env_api_key, current_dir, data_dir)
