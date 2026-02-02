@@ -13,6 +13,7 @@ from kiwipiepy import Kiwi
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from pypdf import PdfReader
 
 @st.cache_resource
 def get_kiwi():
@@ -85,10 +86,27 @@ def build_vectorstore(api_key):
     for i, file in enumerate(files):
         status_text.text(f"Processing {file}...")
         file_path = os.path.join(data_dir, file)
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-            chunks = preprocess_and_chunk(content)
-            all_chunks.extend(chunks)
+        
+        content = ""
+        try:
+            if file.lower().endswith(".pdf"):
+                pdf = PdfReader(file_path)
+                for page in pdf.pages:
+                    text = page.extract_text()
+                    if text:
+                        content += text + "\n"
+            else: # Default to text file
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            
+            if content:
+                chunks = preprocess_and_chunk(content)
+                all_chunks.extend(chunks)
+                
+        except Exception as e:
+            st.error(f"Error reading {file}: {e}")
+            continue
+            
         progress_bar.progress((i + 1) / len(files))
     
     status_text.text(f"Generating Embeddings for {len(all_chunks)} chunks...")
@@ -107,22 +125,33 @@ def build_vectorstore(api_key):
     status_text.success("DB successfully built!")
     return vectorstore
 
-def ask_gemini(vectorstore, question, api_key):
+def ask_gemini(vectorstore, question, api_key, chat_history):
     # 1. Morphological Analysis of the Question (Using Kiwi as replacement for Okt)
     processed_question = tokenize_kiwi(question)
     
     # 2. Retrieve Top 5 Documents (Increased from 3 to improve recall)
-    docs = vectorstore.similarity_search(processed_question, k=5)
+    docs = vectorstore.similarity_search(processed_question, k=7)
     context = "\n\n".join([doc.page_content for doc in docs])
     
+    # Format chat history for context
+    # Use last 3 turns to keep prompt size manageable
+    recent_history = chat_history[-6:] if len(chat_history) > 6 else chat_history
+    formatted_history = ""
+    for msg in recent_history:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        formatted_history += f"{role}: {msg['content']}\n"
+
     # 3. System Prompt & Generation
     system_prompt = f"""
-    너는 법률 전문가야. 아래의 [Context]를 바탕으로 질문에 대해 답변해줘.
+    너는 법률 전문가야. 아래의 [Context]와 [Chat History]를 바탕으로 질문에 대해 답변해줘.
     만약 [Context]에 없는 내용이라면 "제공된 문서에서 관련 내용을 찾을 수 없습니다."라고 답해줘.
     오직 제공된 맥락 정보만 참고해서 답변해야 해.
     
     [Context]
     {context}
+    
+    [Chat History]
+    {formatted_history}
     
     [Question]
     {question}
@@ -135,8 +164,12 @@ def ask_gemini(vectorstore, question, api_key):
         temperature=0
     )
     
-    response = llm.invoke(system_prompt)
-    return response.content, docs
+    # Create a generator for streaming
+    def stream_func():
+        for chunk in llm.stream(system_prompt):
+            yield chunk.content
+
+    return stream_func(), docs
 
 
 # 1. Page Config
@@ -153,6 +186,12 @@ st.title("🚀 RAG Chatbot")
 with st.sidebar:
     st.header("⚙️ 설정")
     
+    # Define data directory first to avoid NameError
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(current_dir, "data")
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+    
     # Load API Key from env if available
     env_api_key = os.getenv("GOOGLE_API_KEY", "")
     api_key = st.text_input("Google API Key", value=env_api_key, type="password")
@@ -167,6 +206,16 @@ with st.sidebar:
             st.rerun()
         else:
             st.warning("API Key를 입력해주세요.")
+    
+    # File Upload Section
+    st.markdown("---")
+    st.header("📂 데이터 업로드")
+    uploaded_file = st.file_uploader("학습시킬 파일을 올려주세요 (.txt, .pdf)", type=["txt", "pdf"])
+    if uploaded_file:
+        file_path = os.path.join(data_dir, uploaded_file.name)
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        st.success(f"'{uploaded_file.name}' 저장 완료! 아래 [DB 구축하기]를 눌러 반영해주세요.")
     
     st.markdown("---")
     st.header("🗄️ 데이터 베이스 상태")
@@ -197,6 +246,13 @@ with st.sidebar:
                         st.write("데이터를 가져올 수 없습니다.")
                 except Exception as e:
                     st.error(f"데이터 확인 중 오류: {e}")
+            
+            # Rebuild DB button for updating data
+            if st.button("🔄 DB 갱신하기"):
+                 with st.spinner("데이터 처리 중..."):
+                      vectorstore = build_vectorstore(api_key)
+                      get_vectorstore.clear()
+                      st.rerun()
 
         else:
             st.warning("⚠️ DB가 없습니다.")
@@ -208,11 +264,7 @@ with st.sidebar:
     else:
         st.info("API Key를 입력하면 DB 상태를 확인할 수 있습니다.")
 
-    # Project root data folder preparation
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    data_dir = os.path.join(current_dir, "data")
-    
-    if os.path.exists(data_dir):
+
         files = os.listdir(data_dir)
         if files:
             st.markdown("---")
@@ -249,10 +301,14 @@ if prompt := st.chat_input("궁금한 내용을 물어보세요..."):
              response = "⚠️ DB가 로드되지 않았습니다. DB를 먼저 구축해주세요."
              message_placeholder.warning(response)
         else:
+            # Change spinner context to allow streaming write
             with st.spinner("답변 생성 중..."):
                 try:
-                    response_text, docs = ask_gemini(vectorstore, prompt, api_key)
-                    message_placeholder.markdown(response_text)
+                    stream, docs = ask_gemini(vectorstore, prompt, api_key, st.session_state.messages)
+                    
+                    # Use st.write_stream to simulate typing effect
+                    # write_stream returns the full concatenated string
+                    response_text = message_placeholder.write_stream(stream)
                     
                     # Optional: Show sources in expander
                     with st.expander("📚 참조 문서"):

@@ -2,6 +2,7 @@ streamlit
 kiwipiepy
 langchain
 langchain-community
-langchain-text-splitters
+langcpython-dotenv
+pypdfxt-splitters
 chromadb
 langchain-google-genai
